@@ -14,77 +14,53 @@
 ##                               ##
 ###################################
 
-set -xe
+set -e
 
-#### Variables ####
-SERVER_LAUNCHER="while [ true ]; do java -Xms4G -Xmx4G -XX:+UseG1GC -XX:+ParallelRefProcEnabled -XX:MaxGCPauseMillis=200 -XX:+UnlockExperimentalVMOptions -XX:+DisableExplicitGC -XX:+AlwaysPreTouch -XX:G1HeapWastePercent=5 -XX:G1MixedGCCountTarget=4 -XX:InitiatingHeapOccupancyPercent=15 -XX:G1MixedGCLiveThresholdPercent=90 -XX:G1RSetUpdatingPauseTimePercent=5 -XX:SurvivorRatio=32 -XX:+PerfDisableSharedMem -XX:MaxTenuringThreshold=1 -Dusing.aikars.flags=https://mcflags.emc.gs -Daikars.new.flags=true -XX:G1NewSizePercent=30 -XX:G1MaxNewSizePercent=40 -XX:G1HeapRegionSize=8M -XX:G1ReservePercent=20 -jar server.jar --nogui; echo Server restarting...; echo Press CTRL + C to stop.; sleep 2; done"
-PROXY_LAUNCHER="while [ true ]; do java -Xms4G -Xmx4G -XX:+UseG1GC -XX:G1HeapRegionSize=4M -XX:+UnlockExperimentalVMOptions -XX:+ParallelRefProcEnabled -XX:+AlwaysPreTouch -XX:MaxInlineLevel=15 -jar server.jar; echo Server restarting...; echo Press CTRL + C to stop.; done"
+# USAGE: msm subcommand [args]
+# Subcommands:
+#  new <name> <kind> - Create a server with the given name and kind (e.g. paper)
+#  start - Start all servers
+#  restart - Restart all servers
 
-VELOCITY_BOOTSTRAP="#!/usr/bin/env bash\n\ntimeout 10s bash launch.sh\nsed -i 's/25577/25565/g' ./velocity.toml\nsed -i '/\[forced-hosts\]/,/\[advanced\]/ {//!d}' ./velocity.toml\nrm bootstrap.sh\n"
+### STARTUP ###
 
-LOWEST_PORT=25566
-
-# If we're not currently running a tmux session called `minecraft`
-if [ -z "$(tmux list-sessions -F "#{session_name}" | grep minecraft)" ]; then
+# Check for tmux msm_console session being absent
+if ! tmux list-sessions -F "#{session_name}" | grep -q msm_console; then
 	if [ -f /tmp/msm_ports ]; then
 		rm /tmp/msm_ports
 	fi
 fi
 
-# Load ports from /tmp/
+### JAVA FLAGS ###
+SERVER_FLAGS="-Xms4G -Xmx4G -XX:+UseG1GC -XX:+ParallelRefProcEnabled -XX:MaxGCPauseMillis=200 -XX:+UnlockExperimentalVMOptions -XX:+DisableExplicitGC -XX:+AlwaysPreTouch -XX:G1HeapWastePercent=5 -XX:G1MixedGCCountTarget=4 -XX:InitiatingHeapOccupancyPercent=15 -XX:G1MixedGCLiveThresholdPercent=90 -XX:G1RSetUpdatingPauseTimePercent=5 -XX:SurvivorRatio=32 -XX:+PerfDisableSharedMem -XX:MaxTenuringThreshold=1 -Dusing.aikars.flags=https://mcflags.emc.gs -Daikars.new.flags=true -XX:G1NewSizePercent=30 -XX:G1MaxNewSizePercent=40 -XX:G1HeapRegionSize=8M -XX:G1ReservePercent=20"
+PROXY_FLAGS="-Xms4G -Xmx4G -XX:+UseG1GC -XX:G1HeapRegionSize=4M -XX:+UnlockExperimentalVMOptions -XX:+ParallelRefProcEnabled -XX:+AlwaysPreTouch -XX:MaxInlineLevel=15"
+
+### LAUNCHERS ###
+SERVER_LAUNCHER="while true; do java $SERVER_FLAGS -jar server.jar --nogui; echo Server crashed, restarting in 10 seconds...; sleep 10; done"
+PROXY_LAUNCHER="while true; do java $PROXY_FLAGS -jar server.jar; echo Server crashed, restarting in 10 seconds...; sleep 10; done"
+
+### CONSTANTS ###
+AUTO_ACCEPT_EULA=true
+LOWEST_PORT=25566
+
+### VARIABLES ###
 if [ -f /tmp/msm_ports ]; then
-	server_ports=($(cat /tmp/msm_ports))
+	source /tmp/msm_ports
 else
-	server_ports=()
+	ports=()
 fi
 
-server_names=()
-server_dirs=()
+### TMUX SESSIONS ###
+if ! tmux list-sessions -F "#{session_name}" | grep -q msm_bootstrap; then
+	tmux new-session -d -s msm_bootstrap
+fi
 
-#### Functions ####
-function configure_server() {
-	server_dir=$1
-	server_port=$2
-
-	echo "$server_dir : $server_port"
-
-	# Configure the server for the proxy
-	sed -i "s/server-port=.*/server-port=$server_port/g" "$server_dir/server.properties"
-	sed -i "s/online-mode=true/online-mode=false/g" "$server_dir/server.properties"
-	sed -i "s/enforce-secure-profile=true/enforce-secure-profile=false/g" "$server_dir/server.properties"
-
-	# If `eula=false` exists in `eula.txt`
-	if grep -q "eula=false" "$server_dir/eula.txt"; then
-		echo "Do you accept the Minecraft EULA? (https://account.mojang.com/documents/minecraft_eula)"
-
-		# Prompt them `Y/n` and also accept empty as yes
-		read -p "Y/n: " eula_accept
-
-		case $eula_accept in
-			[Yy]* ) echo "eula=true" > "$server_dir/eula.txt";;
-			[Nn]* ) echo "You must accept the EULA to run the server. Exiting...";;
-			* ) echo "Invalid input. Exiting...";;
-		esac
-	fi
-}
-
-function get_velocity_link() {
-	RELEASE_JSON=$(curl -s https://api.papermc.io/v2/projects/velocity/)
-	RELEASE=$(echo $RELEASE_JSON | jq -r '.versions[-1]')
-
-	BUILD_JSON=$(curl -s https://api.papermc.io/v2/projects/velocity/versions/$RELEASE/builds/)
-	BUILD=$(echo $BUILD_JSON | jq -r '.builds[-1].build')
-
-	URL="https://api.papermc.io/v2/projects/velocity/versions/$RELEASE/builds/$BUILD/downloads/velocity-$RELEASE-$BUILD.jar"
-
-	# Return the URL
-	echo $URL
-}
-
+### FUNCTIONS ###
 function clear_proxy() {
 	sed -i '/\[servers\]/,/try/ {//!d}' ./servers/proxy/velocity.toml
 }
 
+# Usage: add_server_to_proxy <name> <port>
 function add_server_to_proxy() {
 	IP="127.0.0.1:$2"
 	STRING="$1 = \"$IP\""
@@ -92,146 +68,177 @@ function add_server_to_proxy() {
 	sed -i "/\[servers\]/a $STRING" ./servers/proxy/velocity.toml
 }
 
-# Create proxy folder and download velocity and the config
-# If velocity.toml or the server.jar doesn't exist
-if [ ! -d "./servers/proxy" ] || [ ! -f "./servers/proxy/server.jar" ] || [ ! -f "./servers/proxy/velocity.toml" ]; then
-	mkdir -p ./servers/proxy
-	echo $PROXY_LAUNCHER > ./servers/proxy/launch.sh
-	echo -e "$VELOCITY_BOOTSTRAP" > ./servers/proxy/bootstrap.sh
-	wget $(get_velocity_link) -O ./servers/proxy/server.jar
-	(cd ./servers/proxy && bash bootstrap.sh)
-fi
+# Usage: configure_server <name> <port> [bootstrap]
+function configure_server() {
+	# Whether or not to bootstrap the server
+	local bootstrap="${3:-false}"
 
-# `new` subcommand to create a new server
-if [ "$1" == "new" ]; then
-	server_dir="./servers/$2"
+	local name=$1
+	local port=$2
 
-	# Check if the server name is not empty
-	if [ -z "$2" ]; then
-		echo "You must provide a server name."
-		exit 1
+	local dir="./servers/$name"
+
+	if [ "$name" == "proxy" ]; then
+		if [ "$bootstrap" = "true" ]; then
+			echo "Bootstrapping proxy..."
+
+			tmux send-keys -t "msm_bootstrap" "(cd $dir && java -jar server.jar); tmux wait -S msm_bootstrap" Enter
+			tmux send-keys -t "msm_bootstrap" "stop" Enter
+			tmux wait "msm_bootstrap"
+
+			sed -i "s/25577/$port/g" "$dir/velocity.toml"
+			sed -i '/\[forced-hosts\]/,/\[advanced\]/ {//!d}' "$dir/velocity.toml"
+		fi
+
+		return
 	fi
 
-	# Check if the server already exists
-	if [ -d "$server_dir" ]; then
-		echo "The server already exists."
-		exit 1
+	if [ "$bootstrap" = "true" ]; then
+		echo "Bootstrapping $name..."
+
+		tmux send-keys -t "msm_bootstrap" "(cd $dir && java -jar server.jar --nogui); tmux wait -S msm_bootstrap" Enter
+		tmux wait "msm_bootstrap"
+
+		sed -i "s/online-mode=true/online-mode=false/g" "$dir/server.properties"
+		sed -i "s/enforce-secure-profile=true/enforce-secure-profile=false/g" "$dir/server.properties"
 	fi
 
-	# Check for the server type
-	if [ -z "$3" ]; then
-		echo "You must provide a server type."
-		exit 1
+	if $AUTO_ACCEPT_EULA; then
+		if grep -q "eula=false" "$dir/eula.txt"; then
+			echo "eula=true" > "$dir/eula.txt"
+		fi
 	fi
 
-	case $3 in
+	sed -i "s/server-port=.*/server-port=$port/g" "$dir/server.properties"
+}
+
+# Usage: create_server <name> <kind>
+function create_server() {
+	local name=$1
+	local kind=$2
+
+	# Create the server
+	mkdir -p "./servers/$name"
+
+	case $kind in
+		"velocity")
+			# set +x
+			RELEASE_JSON=$(curl -s https://api.papermc.io/v2/projects/velocity/)
+			RELEASE=$(echo "$RELEASE_JSON" | jq -r '.versions[-1]')
+
+			BUILD_JSON=$(curl -s "https://api.papermc.io/v2/projects/velocity/versions/$RELEASE/builds/")
+			BUILD=$(echo "$BUILD_JSON" | jq -r '.builds[-1].build')
+			# set -x
+
+			URL="https://api.papermc.io/v2/projects/velocity/versions/$RELEASE/builds/$BUILD/downloads/velocity-$RELEASE-$BUILD.jar"
+
+			wget -O "./servers/$name/server.jar" "$URL"
+			;;
 		"paper")
-			mkdir -p "$server_dir"
-			echo "Downloading Paper..."
+			# set +x
 			VERSION_JSON=$(curl -s https://papermc.io/api/v2/projects/paper/)
-			VERSION=$(echo $VERSION_JSON | jq -r '.versions[-1]')
-			BUILD_JSON=$(curl -s https://papermc.io/api/v2/projects/paper/versions/$VERSION/)
-			BUILD=$(echo $BUILD_JSON | jq -r '.builds[-1]')
+			VERSION=$(echo "$VERSION_JSON" | jq -r '.versions[-1]')
+			BUILD_JSON=$(curl -s "https://papermc.io/api/v2/projects/paper/versions/$VERSION/")
+			BUILD=$(echo "$BUILD_JSON" | jq -r '.builds[-1]')
+			# set -x
 
-			wget "https://papermc.io/api/v2/projects/paper/versions/$VERSION/builds/$BUILD/downloads/paper-$VERSION-$BUILD.jar" -O "./servers/$2/server.jar"
+			wget "https://papermc.io/api/v2/projects/paper/versions/$VERSION/builds/$BUILD/downloads/paper-$VERSION-$BUILD.jar" -O "./servers/$name/server.jar"
 			;;
 		"fabric")
-			mkdir -p "$server_dir"
+			# set +x
+			JSON=$(curl -s https://meta.fabricmc.net/v2/versions/)
 
-			VERSION_JSON=$(curl -s https://meta.fabricmc.net/v2/versions/)
+			GAME=$(echo "$JSON" | jq -r ".game | map(select(.stable == true))[0].version")
+			LOADER=$(echo "$JSON" | jq -r ".loader | map(select(.stable == true))[0].version")
+			INSTALLER=$(echo "$JSON" | jq -r ".installer | map(select(.stable == true))[0].version")
+			# set -x
 
-			GAME_VERSION=$(echo $VERSION_JSON | jq -r ".game | map(select(.stable == true))[0].version")
-			LOADER_VERSION=$(echo $VERSION_JSON | jq -r ".loader | map(select(.stable == true))[0].version")
-			INSTALLER_VERSION=$(echo $VERSION_JSON | jq -r ".installer | map(select(.stable == true))[0].version")
-
-			wget "https://meta.fabricmc.net/v2/versions/loader/$GAME_VERSION/$LOADER_VERSION/$INSTALLER_VERSION/server/jar" -O "./servers/$2/server.jar"
+			wget "https://meta.fabricmc.net/v2/versions/loader/$GAME/$LOADER/$INSTALLER/server/jar" -O "./servers/$name/server.jar"
 			;;
 		*)
-			echo "Invalid server type."
+			echo "Invalid server type"
 			exit 1
 			;;
 	esac
+}
 
-	# If the proxy is running (check with tmux)
-	if [ -n "$(tmux list-sessions -F "#{session_name}" | grep minecraft)" ]; then
-		if [ -z "$server_ports" ]; then
-			server_ports+=($LOWEST_PORT)
-		else
-			server_ports+=($((${server_ports[-1]} + 1)))
-		fi
-
-		# We don't have a EULA yet, so the server will close quickly in
-		# the bootstrap phase. This is why the EUlA is accepted in the
-		# steps after the server is bootstrapped.
-		if [ ! -f "$server_dir/server.properties" ]; then
-			(cd $server_dir && java -jar server.jar --nogui)
-		fi
-
-		configure_server $server_dir ${server_ports[-1]}
-
-		echo Adding server to proxy...
-		add_server_to_proxy "$2" "${server_ports[-1]}"
-		tmux send-keys -t proxy Enter "velocity reload" Enter
-		tmux new-window -n $2 -c $server_dir "bash ../launch.sh"
+function increment_port() {
+	if [ -z "$ports" ]; then
+		echo "No server ports found, starting at $LOWEST_PORT"
+		ports+=("$LOWEST_PORT")
+	else
+		echo "Incrementing port from ${ports[-1]}"
+		ports+=($((${ports[-1]} + 1)))
 	fi
+}
+
+### CLI ###
+# Usage: msm new <name> <kind>
+if [ "$1" == "new" ]; then
+	if [ -z "$2" ] || [ -z "$3" ]; then
+		echo "Usage: msm new <name> <kind>"
+		exit 1
+	fi
+
+	increment_port
+	echo "Creating $3 server $2 with port ${ports[-1]}"
+
+	create_server "$2" "$3"
+	configure_server "$2" "${ports[-1]}" true
+
+	add_server_to_proxy "$2" "${ports[-1]}"
+
+	# Send Ctrl+A, Ctrl+K to `msm_console` `proxy` window
+	tmux send-keys -t "msm_console:proxy" C-a C-k
+	tmux send-keys -t "msm_console:proxy" "velocity reload" Enter
+
+	tmux new-window -n "$2" -c "./servers/$2" "$SERVER_LAUNCHER"
+
+	declare -p ports > /tmp/msm_ports
 
 	exit 0
 fi
 
-echo $SERVER_LAUNCHER > ./servers/launch.sh
+# Create the proxy
+if [ ! -d "./servers/proxy/" ]; then
+	create_server proxy velocity
+	configure_server proxy 25565 true
+fi
 
-for server in ./servers/*; do
-	if [ -d $server ]; then
-		server_names+=($(basename $server))
-		server_dirs+=($server)
-
-		if [ -z "$server_ports" ]; then
-			server_ports+=($LOWEST_PORT)
-		else
-			server_ports+=($((${server_ports[-1]} + 1)))
-		fi
-	fi
-done
-
-# Save ports to /tmp/
-echo ${server_ports[@]} > /tmp/msm_ports
-echo "Server ports in use: ${server_ports[@]}"
+if [ ! -d "./servers/lobby" ]; then
+	create_server lobby paper
+fi
 
 clear_proxy
 
-# Create a TMUX session
-tmux new-session -d -s minecraft
-tmux_pid=$(tmux list-sessions -F "#{session_name} #{session_id}" | grep minecraft | awk '{print $2}')
+if ! tmux list-sessions -F "#{session_name}" | grep -q msm_console; then
+	echo "MSM CONSOLE STARTING"
+	tmux new-session -d -s msm_console
+fi
 
-for i in ${!server_names[@]}; do
-	server_dir=${server_dirs[$i]}
-	server_name=${server_names[$i]}
-	server_port=${server_ports[$i]}
+for server in ./servers/*; do
+	if [ ! -d "./servers/$server" ]; then
+		name=$(basename "$server")
 
-	# If it's not the proxy, add it to the proxy
-	if [ $server_name != "proxy" ]; then
-		# We don't have a EULA yet, so the server will close quickly in
-		# the bootstrap phase. This is why the EUlA is accepted in the
-		# steps after the server is bootstrapped.
-		if [ ! -f "$server_dir/server.properties" ]; then
-			(cd $server_dir && java -jar server.jar --nogui)
+		bootstrap=false
+		if [ "$(basename "$server")" != "proxy" ]; then
+			increment_port
+
+			if [ ! -f "$server/server.properties" ]; then
+				bootstrap=true
+			fi
+
+			echo "Configuring $server... with port ${ports[-1]}. Bootstrap: $bootstrap"
+			configure_server "$name" "${ports[-1]}" "$bootstrap"
+			add_server_to_proxy "$name" "${ports[-1]}"
+
+			tmux new-window -n "$name" -c "$server" "$SERVER_LAUNCHER"
 		fi
-
-		configure_server $server_dir $server_port
-		add_server_to_proxy $server_name $server_port
 	fi
-
-	# Check if the server has a local `launch.sh` script (store in a boolean)
-	if [ -f "$server_dir/launch.sh" ]; then
-		launch_script="launch.sh"
-	else
-		launch_script="../launch.sh"
-	fi
-
-	tmux new-window -n $server_name -c $server_dir "bash $launch_script"
 done
 
-tmux kill-window -t minecraft:0
-tmux attach-session -t minecraft
+declare -p ports > /tmp/msm_ports
 
-tmux kill-session -t minecraft
+tmux new-window -n "proxy" -c "./servers/proxy" "$PROXY_LAUNCHER"
+
+tmux attach-session -t msm_console
