@@ -24,8 +24,8 @@ set -e
 
 ### STARTUP ###
 
-# Check for tmux minecraft session being absent
-if ! tmux list-sessions -F "#{session_name}" | grep -q minecraft; then
+# Check for tmux msm_console session being absent
+if ! tmux list-sessions -F "#{session_name}" | grep -q msm_console; then
 	if [ -f /tmp/msm_ports ]; then
 		rm /tmp/msm_ports
 	fi
@@ -44,11 +44,15 @@ AUTO_ACCEPT_EULA=true
 LOWEST_PORT=25566
 
 ### VARIABLES ###
-mapfile -t ports < <(echo "${ports[@]}")
+if [ -f /tmp/msm_ports ]; then
+	source /tmp/msm_ports
+else
+	ports=()
+fi
 
 ### TMUX SESSIONS ###
-if ! tmux list-sessions -F "#{session_name}" | grep -q msm-bootstrap; then
-	tmux new-session -d -s msm-bootstrap
+if ! tmux list-sessions -F "#{session_name}" | grep -q msm_bootstrap; then
+	tmux new-session -d -s msm_bootstrap
 fi
 
 ### FUNCTIONS ###
@@ -78,9 +82,9 @@ function configure_server() {
 		if [ "$bootstrap" = "true" ]; then
 			echo "Bootstrapping proxy..."
 
-			tmux send-keys -t "msm-bootstrap" "(cd $dir && java -jar server.jar); tmux wait -S msm-bootstrap" Enter
-			tmux send-keys -t "msm-bootstrap" "stop" Enter
-			tmux wait "msm-bootstrap"
+			tmux send-keys -t "msm_bootstrap" "(cd $dir && java -jar server.jar); tmux wait -S msm_bootstrap" Enter
+			tmux send-keys -t "msm_bootstrap" "stop" Enter
+			tmux wait "msm_bootstrap"
 
 			sed -i "s/25577/$port/g" "$dir/velocity.toml"
 			sed -i '/\[forced-hosts\]/,/\[advanced\]/ {//!d}' "$dir/velocity.toml"
@@ -92,8 +96,8 @@ function configure_server() {
 	if [ "$bootstrap" = "true" ]; then
 		echo "Bootstrapping $name..."
 
-		tmux send-keys -t "msm-bootstrap" "(cd $dir && java -jar server.jar --nogui); tmux wait -S msm-bootstrap" Enter
-		tmux wait "msm-bootstrap"
+		tmux send-keys -t "msm_bootstrap" "(cd $dir && java -jar server.jar --nogui); tmux wait -S msm_bootstrap" Enter
+		tmux wait "msm_bootstrap"
 
 		sed -i "s/online-mode=true/online-mode=false/g" "$dir/server.properties"
 		sed -i "s/enforce-secure-profile=true/enforce-secure-profile=false/g" "$dir/server.properties"
@@ -159,15 +163,17 @@ function create_server() {
 }
 
 function increment_port() {
-	if [ -z "$server_ports" ]; then
-		server_ports+=("$LOWEST_PORT")
+	if [ -z "$ports" ]; then
+		echo "No server ports found, starting at $LOWEST_PORT"
+		ports+=("$LOWEST_PORT")
 	else
-		server_ports+=($((${server_ports[-1]} + 1)))
+		echo "Incrementing port from ${ports[-1]}"
+		ports+=($((${ports[-1]} + 1)))
 	fi
 }
 
 ### CLI ###
-
+# Usage: msmv2 new <name> <kind>
 if [ "$1" == "new" ]; then
 	if [ -z "$2" ] || [ -z "$3" ]; then
 		echo "Usage: msmv2 new <name> <kind>"
@@ -175,15 +181,20 @@ if [ "$1" == "new" ]; then
 	fi
 
 	increment_port
+	echo "Creating $3 server $2 with port ${ports[-1]}"
 
 	create_server "$2" "$3"
-	configure_server "$2" "${server_ports[-1]}" true
+	configure_server "$2" "${ports[-1]}" true
+
+	add_server_to_proxy "$2" "${ports[-1]}"
 
 	# Send Ctrl+A, Ctrl+K to `msm_console` `proxy` window
 	tmux send-keys -t "msm_console:proxy" C-a C-k
 	tmux send-keys -t "msm_console:proxy" "velocity reload" Enter
 
 	tmux new-window -n "$2" -c "./servers/$2" "$SERVER_LAUNCHER"
+
+	declare -p ports > /tmp/msm_ports
 
 	exit 0
 fi
@@ -207,27 +218,27 @@ fi
 
 for server in ./servers/*; do
 	if [ ! -d "./servers/$server" ]; then
-		increment_port
-
 		name=$(basename "$server")
 
 		bootstrap=false
 		if [ "$(basename "$server")" != "proxy" ]; then
+			increment_port
+
 			if [ ! -f "$server/server.properties" ]; then
 				bootstrap=true
 			fi
 
-			echo "Configuring $server... with port ${server_ports[-1]}. Bootstrap: $bootstrap"
-			configure_server "$name" "${server_ports[-1]}" "$bootstrap"
-			add_server_to_proxy "$name" "${server_ports[-1]}"
+			echo "Configuring $server... with port ${ports[-1]}. Bootstrap: $bootstrap"
+			configure_server "$name" "${ports[-1]}" "$bootstrap"
+			add_server_to_proxy "$name" "${ports[-1]}"
 
 			tmux new-window -n "$name" -c "$server" "$SERVER_LAUNCHER"
 		fi
 	fi
 done
 
-tmux new-window -n "proxy" -c "./servers/proxy" "$PROXY_LAUNCHER"
+declare -p ports > /tmp/msm_ports
 
-echo "${server_ports[@]}" > /tmp/msm_ports
+tmux new-window -n "proxy" -c "./servers/proxy" "$PROXY_LAUNCHER"
 
 tmux attach-session -t msm_console
