@@ -20,7 +20,7 @@ set -e
 SERVER_LAUNCHER="while [ true ]; do java -Xms4G -Xmx4G -XX:+UseG1GC -XX:+ParallelRefProcEnabled -XX:MaxGCPauseMillis=200 -XX:+UnlockExperimentalVMOptions -XX:+DisableExplicitGC -XX:+AlwaysPreTouch -XX:G1HeapWastePercent=5 -XX:G1MixedGCCountTarget=4 -XX:InitiatingHeapOccupancyPercent=15 -XX:G1MixedGCLiveThresholdPercent=90 -XX:G1RSetUpdatingPauseTimePercent=5 -XX:SurvivorRatio=32 -XX:+PerfDisableSharedMem -XX:MaxTenuringThreshold=1 -Dusing.aikars.flags=https://mcflags.emc.gs -Daikars.new.flags=true -XX:G1NewSizePercent=30 -XX:G1MaxNewSizePercent=40 -XX:G1HeapRegionSize=8M -XX:G1ReservePercent=20 -jar server.jar --nogui; echo Server restarting...; echo Press CTRL + C to stop.; sleep 2; done"
 PROXY_LAUNCHER="while [ true ]; do java -Xms4G -Xmx4G -XX:+UseG1GC -XX:G1HeapRegionSize=4M -XX:+UnlockExperimentalVMOptions -XX:+ParallelRefProcEnabled -XX:+AlwaysPreTouch -XX:MaxInlineLevel=15 -jar server.jar; echo Server restarting...; echo Press CTRL + C to stop.; done"
 
-VELOCITY_BOOTSTRAP="#!/usr/bin/env bash\n\ntimeout 10s bash launch.sh\nsed -i 's/25577/25565/g' ./velocity.toml\nrm bootstrap.sh\n"
+VELOCITY_BOOTSTRAP="#!/usr/bin/env bash\n\ntimeout 10s bash launch.sh\nsed -i 's/25577/25565/g' ./velocity.toml\nsed -i '/\[forced-hosts\]/,/\[advanced\]/ {//!d}' ./velocity.toml\nrm bootstrap.sh\n"
 
 set -x
 
@@ -67,8 +67,6 @@ if [ ! -f "./servers/proxy/server.jar" ]; then
 	echo -e "$VELOCITY_BOOTSTRAP" > ./servers/proxy/bootstrap.sh
 	wget $(get_velocity_link) -O ./servers/proxy/server.jar
 	(cd ./servers/proxy && bash bootstrap.sh)
-	echo -n "Press RETURN after configuring forced hosts (or removing them)"
-	read
 fi
 
 set +x
@@ -101,7 +99,32 @@ for i in ${!server_names[@]}; do
 
 	# If it's not the proxy, add it to the proxy
 	if [ $server_name != "proxy" ]; then
+		# We don't have a EULA yet, so the server will close quickly in
+		# the bootstrap phase. This is why the EUlA is accepted in the
+		# steps after the server is bootstrapped.
+		if [ ! -f "$server_dir/server.properties" ]; then
+			(cd $server_dir && java -jar server.jar --nogui)
+		fi
+
+		# Configure the server for the proxy
 		sed -i "s/server-port=.*/server-port=$server_port/g" "$server_dir/server.properties"
+		sed -i "s/online-mode=true/online-mode=false/g" "$server_dir/server.properties"
+		sed -i "s/enforce-secure-profile=true/enforce-secure-profile=false/g" "$server_dir/server.properties"
+
+		# If `eula=false` exists in `eula.txt`
+		if grep -q "eula=false" "$server_dir/eula.txt"; then
+			echo "Do you accept the Minecraft EULA? (https://account.mojang.com/documents/minecraft_eula)"
+
+			# Prompt them `Y/n` and also accept empty as yes
+			read -p "Y/n: " eula_accept
+
+			case $eula_accept in
+				[Yy]* ) echo "eula=true" > "$server_dir/eula.txt";;
+				[Nn]* ) echo "You must accept the EULA to run the server. Exiting...";;
+				* ) echo "Invalid input. Exiting...";;
+			esac
+		fi
+
 		add_server_to_proxy $server_name $server_port
 	fi
 
