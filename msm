@@ -14,57 +14,7 @@
 ##                               ##
 ###################################
 
-set -e
-
-# `new` subcommand to create a new server
-if [ "$1" == "new" ]; then
-	# Check if the server name is not empty
-	if [ -z "$2" ]; then
-		echo "You must provide a server name."
-		exit 1
-	fi
-
-	# Check if the server already exists
-	if [ -d "./servers/$2" ]; then
-		echo "The server already exists."
-		exit 1
-	fi
-
-	# Check for the server type
-	if [ -z "$3" ]; then
-		echo "You must provide a server type."
-		exit 1
-	fi
-
-	case $3 in
-		"paper")
-			mkdir -p "./servers/$2"
-			echo "Downloading Paper..."
-			VERSION_JSON=$(curl -s https://papermc.io/api/v2/projects/paper/)
-			VERSION=$(echo $VERSION_JSON | jq -r '.versions[-1]')
-			BUILD_JSON=$(curl -s https://papermc.io/api/v2/projects/paper/versions/$VERSION/)
-			BUILD=$(echo $BUILD_JSON | jq -r '.builds[-1]')
-
-			wget "https://papermc.io/api/v2/projects/paper/versions/$VERSION/builds/$BUILD/downloads/paper-$VERSION-$BUILD.jar" -O "./servers/$2/server.jar"
-			;;
-		"fabric")
-			mkdir -p "./servers/$2"
-			VERSION_JSON=$(curl -s https://meta.fabricmc.net/v2/versions/)
-
-			GAME_VERSION=$(echo $VERSION_JSON | jq -r ".game | map(select(.stable == true))[0].version")
-			LOADER_VERSION=$(echo $VERSION_JSON | jq -r ".loader | map(select(.stable == true))[0].version")
-			INSTALLER_VERSION=$(echo $VERSION_JSON | jq -r ".installer | map(select(.stable == true))[0].version")
-
-			wget "https://meta.fabricmc.net/v2/versions/loader/$GAME_VERSION/$LOADER_VERSION/$INSTALLER_VERSION/server/jar" -O "./servers/$2/server.jar"
-			;;
-		*)
-			echo "Invalid server type."
-			exit 1
-			;;
-	esac
-
-	exit 0
-fi
+set -xe
 
 #### Variables ####
 SERVER_LAUNCHER="while [ true ]; do java -Xms4G -Xmx4G -XX:+UseG1GC -XX:+ParallelRefProcEnabled -XX:MaxGCPauseMillis=200 -XX:+UnlockExperimentalVMOptions -XX:+DisableExplicitGC -XX:+AlwaysPreTouch -XX:G1HeapWastePercent=5 -XX:G1MixedGCCountTarget=4 -XX:InitiatingHeapOccupancyPercent=15 -XX:G1MixedGCLiveThresholdPercent=90 -XX:G1RSetUpdatingPauseTimePercent=5 -XX:SurvivorRatio=32 -XX:+PerfDisableSharedMem -XX:MaxTenuringThreshold=1 -Dusing.aikars.flags=https://mcflags.emc.gs -Daikars.new.flags=true -XX:G1NewSizePercent=30 -XX:G1MaxNewSizePercent=40 -XX:G1HeapRegionSize=8M -XX:G1ReservePercent=20 -jar server.jar --nogui; echo Server restarting...; echo Press CTRL + C to stop.; sleep 2; done"
@@ -72,18 +22,53 @@ PROXY_LAUNCHER="while [ true ]; do java -Xms4G -Xmx4G -XX:+UseG1GC -XX:G1HeapReg
 
 VELOCITY_BOOTSTRAP="#!/usr/bin/env bash\n\ntimeout 10s bash launch.sh\nsed -i 's/25577/25565/g' ./velocity.toml\nsed -i '/\[forced-hosts\]/,/\[advanced\]/ {//!d}' ./velocity.toml\nrm bootstrap.sh\n"
 
-set -x # Enable debug
-
 LOWEST_PORT=25566
 
-server_ports=()
+# If we're not currently running a tmux session called `minecraft`
+if [ -z "$(tmux list-sessions -F "#{session_name}" | grep minecraft)" ]; then
+	if [ -f /tmp/msm_ports ]; then
+		rm /tmp/msm_ports
+	fi
+fi
+
+# Load ports from /tmp/
+if [ -f /tmp/msm_ports ]; then
+	server_ports=($(cat /tmp/msm_ports))
+else
+	server_ports=()
+fi
+
 server_names=()
 server_dirs=()
 
 #### Functions ####
+function configure_server() {
+	server_dir=$1
+	server_port=$2
+
+	echo "$server_dir : $server_port"
+
+	# Configure the server for the proxy
+	sed -i "s/server-port=.*/server-port=$server_port/g" "$server_dir/server.properties"
+	sed -i "s/online-mode=true/online-mode=false/g" "$server_dir/server.properties"
+	sed -i "s/enforce-secure-profile=true/enforce-secure-profile=false/g" "$server_dir/server.properties"
+
+	# If `eula=false` exists in `eula.txt`
+	if grep -q "eula=false" "$server_dir/eula.txt"; then
+		echo "Do you accept the Minecraft EULA? (https://account.mojang.com/documents/minecraft_eula)"
+
+		# Prompt them `Y/n` and also accept empty as yes
+		read -p "Y/n: " eula_accept
+
+		case $eula_accept in
+			[Yy]* ) echo "eula=true" > "$server_dir/eula.txt";;
+			[Nn]* ) echo "You must accept the EULA to run the server. Exiting...";;
+			* ) echo "Invalid input. Exiting...";;
+		esac
+	fi
+}
+
 function get_velocity_link() {
-	# Disable debug
-	set +x
 	RELEASE_JSON=$(curl -s https://api.papermc.io/v2/projects/velocity/)
 	RELEASE=$(echo $RELEASE_JSON | jq -r '.versions[-1]')
 
@@ -91,9 +76,6 @@ function get_velocity_link() {
 	BUILD=$(echo $BUILD_JSON | jq -r '.builds[-1].build')
 
 	URL="https://api.papermc.io/v2/projects/velocity/versions/$RELEASE/builds/$BUILD/downloads/velocity-$RELEASE-$BUILD.jar"
-
-	# Enable debug
-	set -x
 
 	# Return the URL
 	echo $URL
@@ -111,7 +93,8 @@ function add_server_to_proxy() {
 }
 
 # Create proxy folder and download velocity and the config
-if [ ! -f "./servers/proxy/server.jar" ]; then
+# If velocity.toml or the server.jar doesn't exist
+if [ ! -d "./servers/proxy" ] || [ ! -f "./servers/proxy/server.jar" ] || [ ! -f "./servers/proxy/velocity.toml" ]; then
 	mkdir -p ./servers/proxy
 	echo $PROXY_LAUNCHER > ./servers/proxy/launch.sh
 	echo -e "$VELOCITY_BOOTSTRAP" > ./servers/proxy/bootstrap.sh
@@ -119,9 +102,83 @@ if [ ! -f "./servers/proxy/server.jar" ]; then
 	(cd ./servers/proxy && bash bootstrap.sh)
 fi
 
-set +x
+# `new` subcommand to create a new server
+if [ "$1" == "new" ]; then
+	server_dir="./servers/$2"
+
+	# Check if the server name is not empty
+	if [ -z "$2" ]; then
+		echo "You must provide a server name."
+		exit 1
+	fi
+
+	# Check if the server already exists
+	if [ -d "$server_dir" ]; then
+		echo "The server already exists."
+		exit 1
+	fi
+
+	# Check for the server type
+	if [ -z "$3" ]; then
+		echo "You must provide a server type."
+		exit 1
+	fi
+
+	case $3 in
+		"paper")
+			mkdir -p "$server_dir"
+			echo "Downloading Paper..."
+			VERSION_JSON=$(curl -s https://papermc.io/api/v2/projects/paper/)
+			VERSION=$(echo $VERSION_JSON | jq -r '.versions[-1]')
+			BUILD_JSON=$(curl -s https://papermc.io/api/v2/projects/paper/versions/$VERSION/)
+			BUILD=$(echo $BUILD_JSON | jq -r '.builds[-1]')
+
+			wget "https://papermc.io/api/v2/projects/paper/versions/$VERSION/builds/$BUILD/downloads/paper-$VERSION-$BUILD.jar" -O "./servers/$2/server.jar"
+			;;
+		"fabric")
+			mkdir -p "$server_dir"
+
+			VERSION_JSON=$(curl -s https://meta.fabricmc.net/v2/versions/)
+
+			GAME_VERSION=$(echo $VERSION_JSON | jq -r ".game | map(select(.stable == true))[0].version")
+			LOADER_VERSION=$(echo $VERSION_JSON | jq -r ".loader | map(select(.stable == true))[0].version")
+			INSTALLER_VERSION=$(echo $VERSION_JSON | jq -r ".installer | map(select(.stable == true))[0].version")
+
+			wget "https://meta.fabricmc.net/v2/versions/loader/$GAME_VERSION/$LOADER_VERSION/$INSTALLER_VERSION/server/jar" -O "./servers/$2/server.jar"
+			;;
+		*)
+			echo "Invalid server type."
+			exit 1
+			;;
+	esac
+
+	# If the proxy is running (check with tmux)
+	if [ -n "$(tmux list-sessions -F "#{session_name}" | grep minecraft)" ]; then
+		if [ -z "$server_ports" ]; then
+			server_ports+=($LOWEST_PORT)
+		else
+			server_ports+=($((${server_ports[-1]} + 1)))
+		fi
+
+		# We don't have a EULA yet, so the server will close quickly in
+		# the bootstrap phase. This is why the EUlA is accepted in the
+		# steps after the server is bootstrapped.
+		if [ ! -f "$server_dir/server.properties" ]; then
+			(cd $server_dir && java -jar server.jar --nogui)
+		fi
+
+		configure_server $server_dir ${server_ports[-1]}
+
+		echo Adding server to proxy...
+		add_server_to_proxy "$2" "${server_ports[-1]}"
+		tmux send-keys -t proxy Enter "velocity reload" Enter
+		tmux new-window -n $2 -c $server_dir "bash ../launch.sh"
+	fi
+
+	exit 0
+fi
+
 echo $SERVER_LAUNCHER > ./servers/launch.sh
-set -x
 
 for server in ./servers/*; do
 	if [ -d $server ]; then
@@ -135,6 +192,10 @@ for server in ./servers/*; do
 		fi
 	fi
 done
+
+# Save ports to /tmp/
+echo ${server_ports[@]} > /tmp/msm_ports
+echo "Server ports in use: ${server_ports[@]}"
 
 clear_proxy
 
@@ -156,25 +217,7 @@ for i in ${!server_names[@]}; do
 			(cd $server_dir && java -jar server.jar --nogui)
 		fi
 
-		# Configure the server for the proxy
-		sed -i "s/server-port=.*/server-port=$server_port/g" "$server_dir/server.properties"
-		sed -i "s/online-mode=true/online-mode=false/g" "$server_dir/server.properties"
-		sed -i "s/enforce-secure-profile=true/enforce-secure-profile=false/g" "$server_dir/server.properties"
-
-		# If `eula=false` exists in `eula.txt`
-		if grep -q "eula=false" "$server_dir/eula.txt"; then
-			echo "Do you accept the Minecraft EULA? (https://account.mojang.com/documents/minecraft_eula)"
-
-			# Prompt them `Y/n` and also accept empty as yes
-			read -p "Y/n: " eula_accept
-
-			case $eula_accept in
-				[Yy]* ) echo "eula=true" > "$server_dir/eula.txt";;
-				[Nn]* ) echo "You must accept the EULA to run the server. Exiting...";;
-				* ) echo "Invalid input. Exiting...";;
-			esac
-		fi
-
+		configure_server $server_dir $server_port
 		add_server_to_proxy $server_name $server_port
 	fi
 
