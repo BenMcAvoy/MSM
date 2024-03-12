@@ -14,7 +14,8 @@
 ##                               ##
 ###################################
 
-set -x
+set -e
+
 # `new` subcommand to create a new server
 if [ "$1" == "new" ]; then
 	# Check if the server name is not empty
@@ -64,9 +65,6 @@ if [ "$1" == "new" ]; then
 
 	exit 0
 fi
-set +x
-
-set -e
 
 #### Variables ####
 SERVER_LAUNCHER="while [ true ]; do java -Xms4G -Xmx4G -XX:+UseG1GC -XX:+ParallelRefProcEnabled -XX:MaxGCPauseMillis=200 -XX:+UnlockExperimentalVMOptions -XX:+DisableExplicitGC -XX:+AlwaysPreTouch -XX:G1HeapWastePercent=5 -XX:G1MixedGCCountTarget=4 -XX:InitiatingHeapOccupancyPercent=15 -XX:G1MixedGCLiveThresholdPercent=90 -XX:G1RSetUpdatingPauseTimePercent=5 -XX:SurvivorRatio=32 -XX:+PerfDisableSharedMem -XX:MaxTenuringThreshold=1 -Dusing.aikars.flags=https://mcflags.emc.gs -Daikars.new.flags=true -XX:G1NewSizePercent=30 -XX:G1MaxNewSizePercent=40 -XX:G1HeapRegionSize=8M -XX:G1ReservePercent=20 -jar server.jar --nogui; echo Server restarting...; echo Press CTRL + C to stop.; sleep 2; done"
@@ -74,7 +72,7 @@ PROXY_LAUNCHER="while [ true ]; do java -Xms4G -Xmx4G -XX:+UseG1GC -XX:G1HeapReg
 
 VELOCITY_BOOTSTRAP="#!/usr/bin/env bash\n\ntimeout 10s bash launch.sh\nsed -i 's/25577/25565/g' ./velocity.toml\nsed -i '/\[forced-hosts\]/,/\[advanced\]/ {//!d}' ./velocity.toml\nrm bootstrap.sh\n"
 
-set -x
+set -x # Enable debug
 
 LOWEST_PORT=25566
 
