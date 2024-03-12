@@ -14,6 +14,58 @@
 ##                               ##
 ###################################
 
+set -x
+# `new` subcommand to create a new server
+if [ "$1" == "new" ]; then
+	# Check if the server name is not empty
+	if [ -z "$2" ]; then
+		echo "You must provide a server name."
+		exit 1
+	fi
+
+	# Check if the server already exists
+	if [ -d "./servers/$2" ]; then
+		echo "The server already exists."
+		exit 1
+	fi
+
+	# Check for the server type
+	if [ -z "$3" ]; then
+		echo "You must provide a server type."
+		exit 1
+	fi
+
+	case $3 in
+		"paper")
+			mkdir -p "./servers/$2"
+			echo "Downloading Paper..."
+			VERSION_JSON=$(curl -s https://papermc.io/api/v2/projects/paper/)
+			VERSION=$(echo $VERSION_JSON | jq -r '.versions[-1]')
+			BUILD_JSON=$(curl -s https://papermc.io/api/v2/projects/paper/versions/$VERSION/)
+			BUILD=$(echo $BUILD_JSON | jq -r '.builds[-1]')
+
+			wget "https://papermc.io/api/v2/projects/paper/versions/$VERSION/builds/$BUILD/downloads/paper-$VERSION-$BUILD.jar" -O "./servers/$2/server.jar"
+			;;
+		"fabric")
+			mkdir -p "./servers/$2"
+			VERSION_JSON=$(curl -s https://meta.fabricmc.net/v2/versions/)
+
+			GAME_VERSION=$(echo $VERSION_JSON | jq -r ".game | map(select(.stable == true))[0].version")
+			LOADER_VERSION=$(echo $VERSION_JSON | jq -r ".loader | map(select(.stable == true))[0].version")
+			INSTALLER_VERSION=$(echo $VERSION_JSON | jq -r ".installer | map(select(.stable == true))[0].version")
+
+			wget "https://meta.fabricmc.net/v2/versions/loader/$GAME_VERSION/$LOADER_VERSION/$INSTALLER_VERSION/server/jar" -O "./servers/$2/server.jar"
+			;;
+		*)
+			echo "Invalid server type."
+			exit 1
+			;;
+	esac
+
+	exit 0
+fi
+set +x
+
 set -e
 
 #### Variables ####
